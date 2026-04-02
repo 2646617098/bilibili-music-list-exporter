@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+src/bili_music_list/__init__.py
+src/bili_music_list/bilibili_client.py
+src/bili_music_list/cli.py
+src/bili_music_list/extractors.py
+src/bili_music_list/llm_parser.py
+src/bili_music_list/models.py
+src/bili_music_list/netease_client.py
+src/bili_music_list.egg-info/PKG-INFO
+src/bili_music_list.egg-info/SOURCES.txt
+src/bili_music_list.egg-info/dependency_links.txt
+src/bili_music_list.egg-info/entry_points.txt
+src/bili_music_list.egg-info/requires.txt
+src/bili_music_list.egg-info/top_level.txt
+tests/test_extractors.py
+tests/test_netease_client.py

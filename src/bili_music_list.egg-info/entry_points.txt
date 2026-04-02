@@ -1,0 +1,2 @@
+[console_scripts]
+bili-music-list = bili_music_list.cli:main

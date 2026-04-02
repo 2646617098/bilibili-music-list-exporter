@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bili-music-list"
+version = "0.1.0"
+description = "Export songs from a specified Bilibili favorites folder."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "requests>=2.32.0",
+]
+
+[project.scripts]
+bili-music-list = "bili_music_list.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
