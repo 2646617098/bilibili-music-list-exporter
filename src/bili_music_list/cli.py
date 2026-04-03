@@ -4,7 +4,7 @@ import argparse
 import csv
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .bilibili_client import BilibiliClient
 from .extractors import extract_song_candidates
@@ -62,10 +62,22 @@ def run_ai_refine_mode(args: argparse.Namespace) -> None:
     llm_parser = build_llm_parser(args, allow_fallback=False)
     input_path = Path(args.input_csv)
     output_path = Path(args.ai_output or build_ai_output_path(input_path))
-    rows = read_csv_rows(input_path)
-    refined_rows = refine_rows_with_ai(rows, llm_parser)
-    write_refined_csv(output_path, refined_rows)
     simple_output_path = build_simple_output_path(output_path)
+    rows = read_csv_rows(input_path)
+
+    def on_progress(processed: int, total: int, partial_rows: list[dict[str, str]]) -> None:
+        deduped_rows = dedupe_refined_rows(partial_rows)
+        write_refined_csv(output_path, deduped_rows)
+        write_simple_song_list(simple_output_path, deduped_rows)
+        print(f"[progress] 已完成 {processed}/{total} 行，已写入 {len(deduped_rows)} 条记录")
+
+    refined_rows = refine_rows_with_ai(
+        rows,
+        llm_parser,
+        batch_size=args.llm_batch_size,
+        progress_callback=on_progress,
+    )
+    write_refined_csv(output_path, refined_rows)
     write_simple_song_list(simple_output_path, refined_rows)
     print(f"输入文件: {input_path.resolve()}")
     print(f"AI 输出: {output_path.resolve()}")
@@ -82,6 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm-base-url", help="兼容 OpenAI chat/completions 的基础地址，例如 https://api.openai.com/v1")
     parser.add_argument("--llm-api-key", help="LLM API Key")
     parser.add_argument("--llm-model", help="LLM 模型名")
+    parser.add_argument("--llm-retries", type=int, default=3, help="LLM 请求失败时的重试次数")
+    parser.add_argument("--llm-delay-ms", type=int, default=800, help="两次 LLM 请求之间的最小间隔（毫秒）")
+    parser.add_argument("--llm-batch-size", type=int, default=20, help="CSV AI 清洗时每批发送给 LLM 的行数")
+    parser.add_argument("--llm-max-tokens", type=int, default=1200, help="单次 LLM 返回的最大 token 数")
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--with-detail", action="store_true", help="额外请求每个视频详情接口，可能更准但更容易触发风控")
     parser.add_argument("--include-unmatched", action="store_true", help="保留未识别歌曲的视频记录")
@@ -100,6 +116,9 @@ def build_llm_parser(args: argparse.Namespace, allow_fallback: bool) -> Optional
             api_key=args.llm_api_key,
             model=args.llm_model,
             timeout=args.timeout,
+            retries=args.llm_retries,
+            delay_ms=args.llm_delay_ms,
+            max_tokens=args.llm_max_tokens,
         )
     if allow_fallback:
         return None
@@ -246,7 +265,7 @@ def build_simple_rows(
     if llm_parser is None:
         print("[warn] 未提供 LLM 参数，精简输出使用原始解析结果")
         return rows
-    return refine_rows_for_simple_output(rows, llm_parser)
+    return refine_rows_for_simple_output(rows, llm_parser, batch_size=20)
 
 
 def write_simple_song_list(path: Path, rows: list[dict[str, str]]) -> None:
@@ -281,69 +300,100 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(file))
 
 
-def refine_rows_with_ai(rows: list[dict[str, str]], llm_parser: LlmSongParser) -> list[dict[str, str]]:
+def refine_rows_with_ai(
+    rows: list[dict[str, str]],
+    llm_parser: LlmSongParser,
+    batch_size: int = 20,
+    progress_callback: Optional[Callable[[int, int, list[dict[str, str]]], None]] = None,
+) -> list[dict[str, str]]:
     refined: list[dict[str, str]] = []
-    for index, row in enumerate(rows, start=1):
+    size = max(batch_size, 1)
+    for batch_start in range(0, len(rows), size):
+        batch = rows[batch_start : batch_start + size]
         try:
-            normalized = llm_parser.normalize_existing_song(row)
+            normalized_batch = llm_parser.normalize_existing_songs(batch)
         except Exception as exc:
-            print(f"[warn] AI 二次解析失败，第 {index} 行: {exc}")
-            normalized = {
-                "song_title": (row.get("song_title") or "").strip(),
-                "artist": (row.get("artist") or "").strip(),
-                "confidence": float(row.get("confidence") or 0),
-                "reason": "fallback to original row",
-            }
-        refined.append(
-            {
-                "song_title": normalized["song_title"],
-                "artist": normalized["artist"],
-                "confidence": normalized["confidence"],
-                "source_bvid": row.get("source_bvid") or "",
-                "source_video_title": row.get("source_video_title") or "",
-                "source_video_url": row.get("source_video_url") or "",
-                "uploader": row.get("uploader") or "",
-                "reason": normalized["reason"],
-            }
-        )
-    deduped: dict[str, dict[str, str]] = {}
-    for row in refined:
-        key = f"{row['song_title'].strip().lower()}::{row['artist'].strip().lower()}"
-        current = deduped.get(key)
-        if current is None or float(row["confidence"]) > float(current["confidence"]):
-            deduped[key] = row
-    return sorted(deduped.values(), key=lambda item: item["song_title"].lower())
+            print(f"[warn] AI 批量解析失败，第 {batch_start + 1}-{batch_start + len(batch)} 行: {exc}")
+            normalized_batch = []
+            for offset, row in enumerate(batch, start=1):
+                try:
+                    normalized_batch.append(llm_parser.normalize_existing_song(row))
+                except Exception as item_exc:
+                    print(f"[warn] AI 二次解析失败，第 {batch_start + offset} 行: {item_exc}")
+                    normalized_batch.append(
+                        {
+                            "song_title": (row.get("song_title") or "").strip(),
+                            "artist": (row.get("artist") or "").strip(),
+                            "confidence": float(row.get("confidence") or 0),
+                            "reason": "fallback to original row",
+                        }
+                    )
+        for row, normalized in zip(batch, normalized_batch):
+            refined.append(
+                {
+                    "song_title": normalized["song_title"],
+                    "artist": normalized["artist"],
+                    "confidence": normalized["confidence"],
+                    "source_bvid": row.get("source_bvid") or "",
+                    "source_video_title": row.get("source_video_title") or "",
+                    "source_video_url": row.get("source_video_url") or "",
+                    "uploader": row.get("uploader") or "",
+                    "reason": normalized["reason"],
+                }
+            )
+        if progress_callback is not None:
+            progress_callback(min(batch_start + len(batch), len(rows)), len(rows), refined)
+    return dedupe_refined_rows(refined)
 
 
-def refine_rows_for_simple_output(rows: list[dict[str, str]], llm_parser: LlmSongParser) -> list[dict[str, str]]:
+def refine_rows_for_simple_output(
+    rows: list[dict[str, str]],
+    llm_parser: LlmSongParser,
+    batch_size: int = 20,
+) -> list[dict[str, str]]:
     refined: list[dict[str, str]] = []
-    for index, row in enumerate(rows, start=1):
+    size = max(batch_size, 1)
+    for batch_start in range(0, len(rows), size):
+        batch = rows[batch_start : batch_start + size]
         try:
-            normalized = llm_parser.normalize_for_simple_output(row)
+            normalized_batch = llm_parser.normalize_for_simple_output_batch(batch)
         except Exception as exc:
-            print(f"[warn] 精简输出 AI 清洗失败，第 {index} 行: {exc}")
-            normalized = {
-                "song_title": (row.get("song_title") or "").strip(),
-                "artist": (row.get("artist") or "").strip(),
-                "confidence": float(row.get("confidence") or 0),
-                "reason": "fallback to original row",
-            }
-        if not normalized["song_title"]:
-            continue
-        refined.append(
-            {
-                "song_title": normalized["song_title"],
-                "artist": normalized["artist"],
-                "confidence": normalized["confidence"],
-                "source_bvid": row.get("source_bvid") or "",
-                "source_video_title": row.get("source_video_title") or "",
-                "source_video_url": row.get("source_video_url") or "",
-                "uploader": row.get("uploader") or "",
-                "reason": normalized["reason"],
-            }
-        )
+            print(f"[warn] 精简输出 AI 批量清洗失败，第 {batch_start + 1}-{batch_start + len(batch)} 行: {exc}")
+            normalized_batch = []
+            for offset, row in enumerate(batch, start=1):
+                try:
+                    normalized_batch.append(llm_parser.normalize_for_simple_output(row))
+                except Exception as item_exc:
+                    print(f"[warn] 精简输出 AI 清洗失败，第 {batch_start + offset} 行: {item_exc}")
+                    normalized_batch.append(
+                        {
+                            "song_title": (row.get("song_title") or "").strip(),
+                            "artist": (row.get("artist") or "").strip(),
+                            "confidence": float(row.get("confidence") or 0),
+                            "reason": "fallback to original row",
+                        }
+                    )
+        for row, normalized in zip(batch, normalized_batch):
+            if not normalized["song_title"]:
+                continue
+            refined.append(
+                {
+                    "song_title": normalized["song_title"],
+                    "artist": normalized["artist"],
+                    "confidence": normalized["confidence"],
+                    "source_bvid": row.get("source_bvid") or "",
+                    "source_video_title": row.get("source_video_title") or "",
+                    "source_video_url": row.get("source_video_url") or "",
+                    "uploader": row.get("uploader") or "",
+                    "reason": normalized["reason"],
+                }
+            )
+    return dedupe_refined_rows(refined)
+
+
+def dedupe_refined_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     deduped: dict[str, dict[str, str]] = {}
-    for row in refined:
+    for row in rows:
         key = f"{row['song_title'].strip().lower()}::{row['artist'].strip().lower()}"
         current = deduped.get(key)
         if current is None or float(row["confidence"]) > float(current["confidence"]):

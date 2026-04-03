@@ -83,10 +83,15 @@ bili-music-list ^
   --ai-output output/music_list_ai.csv ^
   --llm-base-url https://api.openai.com/v1 ^
   --llm-api-key YOUR_API_KEY ^
-  --llm-model gpt-4.1-mini
+  --llm-model gpt-4.1-mini ^
+  --llm-batch-size 10 ^
+  --llm-retries 5 ^
+  --llm-delay-ms 1500 ^
+  --llm-max-tokens 800
 ```
 
 输出仍然是一首歌一行，新增 `reason` 字段表示 AI 的清洗依据。
+如果你的 LLM 接口容易出现 `503`、断连或限流，建议适当减小 `--llm-batch-size`，并增大 `--llm-retries` 和 `--llm-delay-ms`。
 
 ## 输出字段
 
