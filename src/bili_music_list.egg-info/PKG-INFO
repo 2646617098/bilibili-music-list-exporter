@@ -19,7 +19,7 @@ Requires-Dist: requests>=2.32.0
 - 可选接入兼容 OpenAI `chat/completions` 的 LLM 做二次抽取
 - 输出 `CSV` 或 `JSON`
 - 自动按歌曲去重
-- 可选自动创建网易云音乐歌单，并导入当前列表
+- 额外输出一个精简文件：每行仅保留“歌曲名 歌手”，优先使用 AI 清洗结果
 
 ## 项目结构
 
@@ -28,11 +28,9 @@ src/bili_music_list/
   bilibili_client.py   # B 站收藏夹/视频详情抓取
   extractors.py        # 规则解析器
   llm_parser.py        # 可选 LLM 解析器
-  netease_client.py    # 网易云歌单创建/搜索/导入
   cli.py               # 命令行入口
 tests/
   test_extractors.py
-  test_netease_client.py
 ```
 
 ## 安装
@@ -93,60 +91,15 @@ bili-music-list ^
   --ai-output output/music_list_ai.csv ^
   --llm-base-url https://api.openai.com/v1 ^
   --llm-api-key YOUR_API_KEY ^
-  --llm-model gpt-4.1-mini
+  --llm-model gpt-4.1-mini ^
+  --llm-batch-size 10 ^
+  --llm-retries 5 ^
+  --llm-delay-ms 1500 ^
+  --llm-max-tokens 800
 ```
 
 输出仍然是一首歌一行，新增 `reason` 字段表示 AI 的清洗依据。
-
-### 6. 自动创建网易云歌单并导入
-
-项目支持把当前导出的歌曲列表，自动导入到一个**新建的网易云歌单**中。
-
-前提：
-
-- 你已经启动了一个兼容 `NeteaseCloudMusicApi` 的服务
-- 你准备好了网易云登录 `Cookie`
-
-示例：
-
-```bash
-bili-music-list ^
-  --media-id 123456789 ^
-  --output output/music_list.csv ^
-  --netease-create-playlist "B站收藏夹导入" ^
-  --netease-base-url http://127.0.0.1:3000 ^
-  --netease-cookie-file netease_cookie.txt
-```
-
-导入完成后，工具会额外输出一个 JSON 报告，里面包含：
-
-- 成功匹配并加入歌单的曲目
-- 没有在网易云搜索到的曲目
-- 新建歌单的 ID 和链接
-
-### 7. 单独生成网易云登录二维码
-
-如果你想把“生成二维码”和“实际导入”拆开，可以先单独生成二维码：
-
-```bash
-bili-music-list ^
-  --netease-generate-login-qr ^
-  --netease-base-url http://127.0.0.1:3000 ^
-  --netease-qr-output output/netease_login_qr.png ^
-  --netease-qr-key-file output/netease_qr_key.txt
-```
-
-扫码并在手机上确认后，再单独检查登录状态并导出 cookie：
-
-```bash
-bili-music-list ^
-  --netease-check-login ^
-  --netease-base-url http://127.0.0.1:3000 ^
-  --netease-qr-key-file output/netease_qr_key.txt ^
-  --netease-cookie-file output/netease_cookie.txt
-```
-
-当状态码为 `803` 时，表示登录成功，工具会把 cookie 写入文件，之后就可以直接拿这个 cookie 做歌单导入。
+如果你的 LLM 接口容易出现 `503`、断连或限流，建议适当减小 `--llm-batch-size`，并增大 `--llm-retries` 和 `--llm-delay-ms`。
 
 ## 输出字段
 
@@ -160,13 +113,18 @@ bili-music-list ^
 - `source_video_url`: 来源视频链接
 - `uploader`: 来源 UP 主
 
+另外还会额外生成一个精简版文件，默认文件名类似 `music_list_simple.csv`：
+
+- 每行一首歌
+- 格式为 `歌曲名 歌手`
+- 如果歌手未知，则只写 `歌曲名`
+- 如果提供了 LLM 参数，精简版会使用更严格的 AI 清洗结果
+- 如果没有提供 LLM 参数，精简版会退回原始解析结果
+
 ## 已验证的接口
 
 - 收藏夹列表：`https://api.bilibili.com/x/v3/fav/resource/list`
 - 视频详情：`https://api.bilibili.com/x/web-interface/view`
-- 网易云搜索：兼容 `NeteaseCloudMusicApi` 的 `/cloudsearch`
-- 网易云建歌单：兼容 `NeteaseCloudMusicApi` 的 `/playlist/create`
-- 网易云加歌：兼容 `NeteaseCloudMusicApi` 的 `/playlist/tracks`
 
 ## 后续可扩展
 

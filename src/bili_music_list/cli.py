@@ -3,18 +3,29 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shlex
+import sys
+import traceback
 from pathlib import Path
 from typing import Callable, Optional
 
-from .bilibili_client import BilibiliClient
-from .extractors import extract_song_candidates
-from .llm_parser import LlmSongParser
-from .models import SongMatch, VideoItem
+try:
+    from .bilibili_client import BilibiliClient
+    from .extractors import extract_song_candidates
+    from .llm_parser import LlmSongParser
+    from .models import SongMatch, VideoItem
+except ImportError:
+    # Support running as a standalone script (e.g. PyInstaller entry).
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from bili_music_list.bilibili_client import BilibiliClient
+    from bili_music_list.extractors import extract_song_candidates
+    from bili_music_list.llm_parser import LlmSongParser
+    from bili_music_list.models import SongMatch, VideoItem
 
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(_resolve_cli_args(parser))
 
     if args.input_csv:
         run_ai_refine_mode(args)
@@ -107,6 +118,73 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input-csv", help="对现有 CSV 做 AI 二次解析")
     parser.add_argument("--ai-output", help="AI 二次解析后的输出路径")
     return parser
+
+
+def _resolve_cli_args(parser: argparse.ArgumentParser) -> list[str]:
+    raw_args = sys.argv[1:]
+    if _is_frozen_executable():
+        _print_frozen_parameter_guide()
+    if raw_args:
+        return raw_args
+    if _is_frozen_executable():
+        print("未检测到命令行参数。")
+        print("请粘贴参数后回车，例如：--media-id 123 --parser heuristic --output output/music_list.csv")
+        print("直接回车将显示帮助并退出。")
+        typed = input("> ").strip()
+        if not typed:
+            parser.print_help()
+            return []
+        return shlex.split(typed, posix=False)
+    return []
+
+
+def _is_frozen_executable() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def _pause_if_frozen() -> None:
+    if _is_frozen_executable():
+        try:
+            input("\n按回车键退出...")
+        except EOFError:
+            pass
+
+
+def _print_frozen_parameter_guide() -> None:
+    print("=" * 72)
+    print("bili-music-list 参数说明 / Parameter Guide")
+    print("- 核心 / Core:")
+    print("  --media-id <id>              要解析的收藏夹ID，进入网页版B站，然后进入对应收藏夹，url上面的fid=123456就是 / Favorite folder id")
+    print("  --parser heuristic|llm|hybrid 解析模式 / Parse mode")
+    print("  --output <path>              输出文件 / Output file")
+    print("  --format csv|json            输出格式 / Output format")
+    print("  --cookie <text>              B站Cookie / Bilibili cookie")
+    print("  --cookie-file <path>         B站Cookie文件 / Cookie file")
+    print("  --with-detail                拉详情 / Fetch detail API")
+    print("  --include-unmatched          保留未识别项 / Keep unmatched")
+    print("  --dedupe-by title|title-artist 去重方式 / Dedupe mode")
+    print("- AI 清洗 / AI refine:")
+    print("  --input-csv <path>           输入CSV / Input CSV")
+    print("  --ai-output <path>           AI输出CSV / AI output CSV")
+    print("  --llm-base-url <url>         模型接口地址 / API base url")
+    print("  --llm-api-key <key>          模型密钥 / API key")
+    print("  --llm-model <name>           模型名 / Model name")
+    print("  --llm-batch-size <n>         批大小 / Batch size")
+    print("  --llm-retries <n>            重试次数 / Retry count")
+    print("  --llm-delay-ms <ms>          请求间隔 / Request delay")
+    print("  --llm-max-tokens <n>         最大输出token / Max output tokens")
+    print("  --timeout <sec>              请求超时秒数 / Timeout seconds")
+    print("- 帮助 / Help:")
+    print("  --help                       显示完整帮助 / Show full help")
+    print("=" * 72)
+    print("- 示例 / Example:")
+    print("- 解析为csv文件，设置media-id即可，需要先将收藏夹设置为公开，或者附带上cookie参数")
+    print("  --media-id 123456 --parser heuristic --output output/music_list.csv")
+    print("- 如果csv中不准，还可以使用ai进一步解析csv文件，示例用的国内模型快速解析，只需要key换成自己的就行")
+    print("  --input-csv output/music_list.csv --ai-output output/music_list_ai.csv --llm-base-url "
+          "https://api.siliconflow.cn/v1 --llm-model Qwen/Qwen2.5-7B-Instruct --llm-batch-size "
+          "8 --llm-retries 1 --llm-delay-ms 200 --llm-max-tokens 250 --timeout 45 --llm-api-key YOUR_KEY")
+    print("=" * 72)
 
 
 def build_llm_parser(args: argparse.Namespace, allow_fallback: bool) -> Optional[LlmSongParser]:
@@ -427,4 +505,24 @@ def build_ai_output_path(input_path: Path) -> Path:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        if _is_frozen_executable():
+            print("\n执行完成 / Completed successfully.")
+            _pause_if_frozen()
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        if _is_frozen_executable():
+            if code == 0:
+                print("\n程序结束 / Program finished.")
+            else:
+                print(f"\n程序异常退出 / Program exited with error code {code}.")
+            _pause_if_frozen()
+        raise
+    except Exception as exc:
+        if _is_frozen_executable():
+            print(f"\n错误 / Error: {exc}")
+            _pause_if_frozen()
+            sys.exit(1)
+        traceback.print_exc()
+        raise

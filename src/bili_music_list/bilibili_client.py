@@ -118,7 +118,15 @@ class BilibiliClient:
 
     def _get_json(self, url: str, params: dict[str, Any]) -> dict[str, Any]:
         response = self.session.get(url, params=params, timeout=self.timeout)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code == 412:
+                raise RuntimeError(
+                    "Bilibili 接口触发 412 风控。请稍后重试，或使用 --cookie/--cookie-file 提供登录态后再试。"
+                ) from exc
+            raise
         payload = response.json()
         code = payload.get("code", -1)
         if code != 0:
