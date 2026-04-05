@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import queue
-import subprocess
+import io
 import sys
 import threading
 import tkinter as tk
+import traceback
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+
+try:
+    from . import cli as cli_module
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    import bili_music_list.cli as cli_module
 
 
 class MusicListGui(tk.Tk):
@@ -16,7 +24,7 @@ class MusicListGui(tk.Tk):
         self.geometry("980x700")
         self.resizable(True, True)
         self.log_queue: queue.Queue[str] = queue.Queue()
-        self.process: subprocess.Popen[str] | None = None
+        self.is_running = False
 
         self._build_ui()
         self.after(100, self._drain_log_queue)
@@ -42,6 +50,7 @@ class MusicListGui(tk.Tk):
         self.export_media_id = tk.StringVar()
         self.export_parser = tk.StringVar(value="heuristic")
         self.export_output = tk.StringVar(value="output/music_list.csv")
+        self.export_cookie_text = tk.StringVar()
         self.export_cookie_file = tk.StringVar()
         self.export_with_detail = tk.BooleanVar(value=False)
         self.export_include_unmatched = tk.BooleanVar(value=False)
@@ -59,6 +68,8 @@ class MusicListGui(tk.Tk):
         self._add_entry(parent, "media_id", self.export_media_id, row)
         row += 1
         self._add_entry(parent, "output", self.export_output, row, file_save=True)
+        row += 1
+        self._add_entry(parent, "cookie (text)", self.export_cookie_text, row, secret=True)
         row += 1
         self._add_entry(parent, "cookie_file", self.export_cookie_file, row, file_open=True)
         row += 1
@@ -219,6 +230,8 @@ class MusicListGui(tk.Tk):
             "--llm-max-tokens",
             self.export_llm_max_tokens.get().strip(),
         ]
+        if self.export_cookie_text.get().strip():
+            args.extend(["--cookie", self.export_cookie_text.get().strip()])
         if self.export_cookie_file.get().strip():
             args.extend(["--cookie-file", self.export_cookie_file.get().strip()])
         if self.export_with_detail.get():
@@ -279,30 +292,32 @@ class MusicListGui(tk.Tk):
             )
 
     def _start_cli_process(self, cli_args: list[str]) -> None:
-        if self.process is not None and self.process.poll() is None:
+        if self.is_running:
             messagebox.showwarning("运行中", "已有任务在运行，请等待当前任务完成。")
             return
 
-        cmd = [sys.executable, "-m", "bili_music_list.cli", *cli_args]
-        self._log(f"$ {' '.join(cmd)}")
+        self._log(f"$ bili-music-list {' '.join(cli_args)}")
+        self.is_running = True
+        self._set_buttons_state("disabled")
 
         def worker() -> None:
             try:
-                self.process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    cwd=str(Path.cwd()),
-                )
-                assert self.process.stdout is not None
-                for line in self.process.stdout:
-                    self.log_queue.put(line.rstrip("\n"))
-                code = self.process.wait()
-                self.log_queue.put(f"[exit] code={code}")
+                out = _QueueWriter(self.log_queue)
+                with redirect_stdout(out), redirect_stderr(out):
+                    try:
+                        cli_module.run_with_args(cli_args)
+                        self.log_queue.put("[exit] code=0")
+                    except SystemExit as exc:
+                        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+                        self.log_queue.put(f"[exit] code={code}")
+                    except Exception:
+                        traceback.print_exc()
+                        self.log_queue.put("[exit] code=1")
             except Exception as exc:
                 self.log_queue.put(f"[error] {exc}")
+            finally:
+                self.is_running = False
+                self.log_queue.put("[ui] enable_buttons")
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -316,8 +331,38 @@ class MusicListGui(tk.Tk):
                 line = self.log_queue.get_nowait()
             except queue.Empty:
                 break
+            if line == "[ui] enable_buttons":
+                self._set_buttons_state("normal")
+                continue
             self._log(line)
         self.after(100, self._drain_log_queue)
+
+    def _set_buttons_state(self, state: str) -> None:
+        for widget in self.winfo_children():
+            self._set_widget_state_recursive(widget, state)
+
+    def _set_widget_state_recursive(self, widget: tk.Widget, state: str) -> None:
+        if isinstance(widget, ttk.Button):
+            try:
+                widget.configure(state=state)
+            except tk.TclError:
+                pass
+        for child in widget.winfo_children():
+            self._set_widget_state_recursive(child, state)
+
+
+class _QueueWriter(io.TextIOBase):
+    def __init__(self, q: queue.Queue[str]) -> None:
+        self.q = q
+
+    def write(self, s: str) -> int:
+        if s:
+            for line in s.rstrip("\n").splitlines():
+                self.q.put(line)
+        return len(s)
+
+    def flush(self) -> None:
+        return None
 
 
 def main() -> None:

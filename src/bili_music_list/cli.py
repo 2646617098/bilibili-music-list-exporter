@@ -23,9 +23,9 @@ except ImportError:
     from bili_music_list.models import SongMatch, VideoItem
 
 
-def main() -> None:
+def run_with_args(raw_args: Optional[list[str]] = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(_resolve_cli_args(parser))
+    args = parser.parse_args(raw_args if raw_args is not None else _resolve_cli_args(parser))
 
     if args.input_csv:
         run_ai_refine_mode(args)
@@ -67,6 +67,10 @@ def main() -> None:
     print(f"歌曲输出: {output_path.resolve()}")
     print(f"精简输出: {simple_output_path.resolve()}")
     print(f"失败列表: {failed_path.resolve()}")
+
+
+def main() -> None:
+    run_with_args()
 
 
 def run_ai_refine_mode(args: argparse.Namespace) -> None:
