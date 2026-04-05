@@ -1,2 +1,3 @@
 [console_scripts]
 bili-music-list = bili_music_list.cli:main
+bili-music-list-gui = bili_music_list.gui:main
